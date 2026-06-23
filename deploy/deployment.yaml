@@ -18,6 +18,7 @@ spec:
       containers:
         - name: demo-app
           image: 573320328/demo-app:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           env:

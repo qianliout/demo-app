@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-app-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # 这个 label 很关键，确保被 Prometheus 选中
+spec:
+  groups:
+    - name: demo-app
+      rules:
+        # 告警 1: Pod 数量不足
+        - alert: DemoAppPodDown
+          expr: |
+            sum(kube_pod_info{namespace="demo", pod=~"demo-app-.*"}) < 2
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Demo App 可用 Pod 数量 {{ $value }} 低于预期"
+            description: "demo-app 的 Pod 数低于 2，可能发生了故障"
+
+        # 告警 2: Pod CPU 使用率超过 80%（持续 5 分钟）
+        - alert: DemoAppHighCPU
+          expr: |
+            sum by (pod) (
+              rate(container_cpu_usage_seconds_total{namespace="demo", pod=~"demo-app-.*", container!=""}[5m])
+            ) /
+            sum by (pod) (
+              kube_pod_container_resource_requests{namespace="demo", pod=~"demo-app-.*", resource="cpu"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} CPU 使用率超过 80%"
+            description: "当前使用率: {{ $value | humanizePercentage }}"
+
+        # 告警 3: Pod 频繁重启
+        - alert: DemoAppFrequentRestart
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="demo", pod=~"demo-app-.*"}[15m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} 正在频繁重启"

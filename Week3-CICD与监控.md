@@ -3,6 +3,7 @@
 > 适用集群：OrbStack K8s (1 master + 1 worker, ARM64, v1.33.13)
 > 前置条件：Helm v3.19.0 已安装，kubectl 可用，SSH 到 master 节点
 
+
 ---
 
 ## 第一部分：CI/CD Pipeline（GitHub Actions → Docker → K8s）
@@ -765,6 +766,14 @@ kubectl apply -f demo-alert.yaml
 kubectl get prometheusrule -n monitoring demo-app-alerts
 ```
 
+> **PrometheusRule 是什么？为什么需要 kubectl apply？**
+>
+> kube-prometheus-stack 通过 `PrometheusRule` CRD 管理告警规则。你只需要写好 YAML 然后 `kubectl apply`，Prometheus Operator 会自动发现新的 PrometheusRule 资源，并将其中的规则注入到 Prometheus 配置中。**全程不需要手动编辑 Prometheus 的配置文件。**
+>
+> 流程：`kubectl apply demo-alert.yaml` → Prometheus Operator 检测到 PrometheusRule → 自动热加载到 Prometheus → Prometheus UI 的 Alerts 页面可见。
+>
+> 关键点：`metadata.labels` 中必须有 `release: kube-prometheus-stack`，这个 label 让 Operator 知道这个规则属于哪个 Prometheus 实例。
+
 #### 7.3 验证告警规则生效
 
 ```bash
@@ -775,6 +784,25 @@ kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:909
 # 或者命令行
 curl -s http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | select(.labels.alertname | startswith("DemoApp"))'
 ```
+
+> **「验证告警规则生效」具体操作和含义**
+>
+> 进入 Prometheus UI 的 **Alerts** 页面（`http://localhost:9090/alerts`），搜索 `DemoApp`，会看到每条告警规则及其状态：
+>
+> | 状态 | 含义 |
+> |------|------|
+> | **Inactive**（绿色） | 规则已加载，但条件未满足。这是正常运行时的状态。 |
+> | **Pending**（黄色） | 条件已满足，但还没达到 `for: 2m` 的持续时长。 |
+> | **Firing**（红色） | 条件持续满足超过 `for` 时长，告警已触发并发送到 Alertmanager。 |
+>
+> **如何验证它真的能触发**：
+> ```bash
+> # 故意缩容到 0，制造 Pod 不足的故障
+> kubectl scale deployment demo-app -n demo --replicas=0
+> # 等 2 分钟后刷新 Prometheus Alerts 页面，DemoAppPodDown 会从 Inactive → Firing
+> # 恢复：
+> kubectl scale deployment demo-app -n demo --replicas=2
+> ```
 
 #### 7.4 配置飞书告警通知（可选）
 
@@ -822,6 +850,36 @@ stringData:
           severity: 'warning'
         equal: ['alertname']
 ```
+
+> **AlertmanagerConfig 的作用是什么？**
+>
+> Prometheus 负责**发现故障**（生成告警），Alertmanager 负责**通知**（告警发给谁、怎么发、多久发一次）。两者的分工：
+>
+> ```
+> Prometheus 产生告警
+>       │
+>       ▼
+> Alertmanager
+>   ├── 分组（group_by）：同一类告警合并成一条消息，避免消息轰炸
+>   ├── 抑制（inhibit）：如果 critical 告警已触发，抑制同类的 warning 级别
+>   ├── 静默（silence）：手动暂停某个告警（比如计划内维护窗口）
+>   └── 路由（route）：决定发给哪个接收器（飞书 / 钉钉 / 邮件）
+>       │
+>       ▼
+>   飞书 Webhook → 群消息通知
+> ```
+>
+> 配置中各字段的含义：
+>
+> | 字段 | 作用 |
+> |------|------|
+> | `group_by: ['alertname']` | 同名告警合并，避免 2 个 Pod 同时挂掉时收到 2 条消息 |
+> | `group_wait: 10s` | 第一次触发后等待 10s，收集同组内的其他告警一起发送 |
+> | `group_interval: 10s` | 同一组已发过通知后，新告警加入时的发送间隔 |
+> | `repeat_interval: 1h` | 告警持续未恢复时，重复发送的间隔（1h 一次，避免刷屏） |
+> | `send_resolved: true` | 告警恢复后也发送通知，让你知道故障已解除 |
+>
+> **一句话总结**：`PrometheusRule` 定义「什么时候告警」，`Alertmanager` 定义「告警后怎么通知」。
 
 ```bash
 kubectl apply -f webhook-alertmanager-config.yaml
@@ -938,7 +996,12 @@ spec:
 
 ---
 
-## Step 9: 实战排障场景训练
+> **📋 日志收集（Loki + Promtail）已拆分为独立笔记** → 见 [Week3-日志体系.md](Week3-日志体系.md)
+> 
+> 内容包括：Loki/Promtail 部署架构、完整 YAML、Grafana 集成、LogQL 查询、kubelet 日志轮转配置。
+
+---
+
 
 花 30 分钟故意制造问题，练习用 Grafana + Prometheus + kubectl 定位：
 
@@ -982,6 +1045,8 @@ kubectl delete namespace demo
 - [ ] 6. 配置一条告警规则，故意触发它，在 Prometheus UI 的 Alerts 页面看到 FIRING 状态
 - [ ] 7. 能回答：`rate()` 和 `irate()` 的区别？
 - [ ] 8. 能回答：Prometheus 是怎么发现要采集哪些 target 的？（ServiceMonitor → Prometheus Operator → Prometheus scrape config）
+- [ ] 9. 搭好 Loki + Promtail，在 Grafana Explore 中用 LogQL 查到 demo-app 的日志
+- [ ] 10. 能回答：Metrics 和 Logs 的区别？Prometheus vs Loki 各自解决什么问题？
 
 ---
 
