@@ -2,168 +2,29 @@
 
 > 适用集群：OrbStack K8s (1 master + 1 worker, ARM64, v1.33.13)
 > 前置条件：kube-prometheus-stack 已安装，Grafana 可访问
-> 可以使用 ssh  k8s-master-01 进入master节点
 
-***
-
-## 第一部分：Grafana Loki + Promtail 日志收集
-
-> Grafana 本身不收集日志，它是可视化面板。日志收集需要额外搭建 **Loki**（日志存储+查询引擎）+ **Promtail**（日志采集代理）。
-
-### 架构
-
-```
-┌──────────────────┐
-│   你的应用 Pod    │── stdout/stderr ──→ /var/log/pods/*.log
-└──────────────────┘                            │
-                                                ▼
-┌──────────────────────────────────────────────────────┐
-│  Promtail (DaemonSet — 每个节点跑一个)                │
-│  ├── 自动发现 Pod 和容器                              │
-│  ├── 给每条日志打上 namespace / pod / container 标签    │
-│  └── 推送日志到 Loki ──────────────────────┐           │
-└───────────────────────────────────────────┼───────────┘
-                                            ▼
-┌──────────────────────────────────────────────────────┐
-│  Loki (单节点 Deployment)                             │
-│  ├── 存储日志（本地 filesystem，5Gi）                   │
-│  ├── 提供 LogQL 查询接口                               │
-│  └── 作为 Grafana 数据源 ──────────┐                   │
-└──────────────────────────────────┼───────────────────┘
-                                   ▼
-┌──────────────────────────────────────────────────────┐
-│  Grafana → Explore → 选 Loki → LogQL 查询日志           │
-│  可以和 Prometheus 指标放在同一个 Dashboard 里对照查看     │
-└──────────────────────────────────────────────────────┘
-```
-
-### Phase 1: 拉取并导入镜像到节点
-
-K8s 节点 VM 无法直接访问 Docker Hub，需要从宿主机搬镜像：
-
-```bash
-# 在 Mac 宿主机上
-docker pull grafana/loki:3.6.7 --platform linux/arm64
-docker pull grafana/promtail:3.5.1 --platform linux/arm64
-
-docker save grafana/loki:3.6.7 grafana/promtail:3.5.1 -o /tmp/loki-images.tar
-
-scp /tmp/loki-images.tar k8s-master-01:/tmp/
-scp /tmp/loki-images.tar k8s-worker-01:/tmp/
-
-ssh k8s-master-01 "sudo ctr -n k8s.io image import /tmp/loki-images.tar"
-ssh k8s-worker-01 "sudo ctr -n k8s.io image import /tmp/loki-images.tar"
-```
-
-### Phase 2: 部署 Loki（日志存储 + 查询引擎）
-
-**deploy/loki.yaml**：
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: loki-config
-  namespace: monitoring
-data:
-  loki.yaml: |
-    auth_enabled: false
-    server:
-      http_listen_port: 3100
-      grpc_listen_port: 9095
-    common:
-      instance_addr: 127.0.0.1
-      path_prefix: /var/loki
-      storage:
-        filesystem:
-          chunks_directory: /var/loki/chunks
-          rules_directory: /var/loki/rules
-      replication_factor: 1
-      ring:
-        kvstore:
-          store: inmemory
-    schema_config:
-      configs:
-        - from: 2024-01-01
-          store: tsdb
-          object_store: filesystem
-          schema: v13
-          index:
-            prefix: loki_index_
-            period: 24h
-    limits_config:
-      allow_structured_metadata: true
-      volume_enabled: true
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: loki
-  namespace: monitoring
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: loki
-  template:
-    metadata:
-      labels:
-        app: loki
-    spec:
-      containers:
-        - name: loki
-          image: grafana/loki:3.6.7
-          imagePullPolicy: IfNotPresent
-          args:
-            - -config.file=/etc/loki/loki.yaml
-          ports:
-            - containerPort: 3100
-              name: http
-          volumeMounts:
-            - name: config
-              mountPath: /etc/loki
-            - name: data
-              mountPath: /var/loki
-          readinessProbe:
-            httpGet:
-              path: /ready
-              port: 3100
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          resources:
-            requests: { cpu: 100m, memory: 256Mi }
-            limits:   { cpu: 500m, memory: 512Mi }
-      volumes:
-        - name: config
-          configMap:
-            name: loki-config
-        - name: data
-          emptyDir:
-            sizeLimit: 5Gi
+
+## 第一部分：安装策略
+
+### Helm vs 裸 YAML
+
+生产环境中常见做法：
+
+| 组件 | 推荐方式 | 原因 |
+|------|---------|------|
+| **Loki** | Helm | 配置项多（存储、schema、限流、保留策略），Helm 模板化管理，一键升级/回滚。`grafana/loki` chart 仍在活跃维护（当前 v7.0.0）。 |
+| **Promtail** | 裸 YAML（DaemonSet + ConfigMap） | 配置极简——就是一个 DaemonSet 读 `/var/log/pods` 推送到 Loki。`grafana/promtail` chart 已弃用。用 YAML 直接管理更透明，配合 ArgoCD/Flux 做 GitOps 很自然。 |
+
+> Promtail 的继任者是 Grafana Alloy（仍在早期），新项目可以评估，旧项目继续用 Promtail YAML 足够。
+
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: loki
-  namespace: monitoring
-spec:
-  ports:
-    - port: 3100
-      name: http
-  selector:
-    app: loki
-```
 
-```bash
-kubectl apply -f deploy/loki.yaml
-kubectl wait --for=condition=ready pod -l app=loki -n monitoring --timeout=120s
-```
+## 第二部分：Promtail（裸 YAML 部署）
 
-### Phase 3: 部署 Promtail（日志采集 DaemonSet）
+Promtail 以 DaemonSet 形式在每个节点运行，读取 `/var/log/pods` 下的容器日志推送 Loki。
 
-Promtail 以 DaemonSet 形式在每个节点上运行，读取 `/var/log/pods` 下的容器日志并推送到 Loki。
-
-**deploy/promtail.yaml**：
+### deploy/promtail.yaml
 
 ```yaml
 apiVersion: v1
@@ -214,6 +75,10 @@ spec:
         app: promtail
     spec:
       serviceAccountName: promtail
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: promtail
           image: grafana/promtail:3.5.1
@@ -271,34 +136,153 @@ subjects:
     namespace: monitoring
 ```
 
+关键点：
+- `tolerations` 使 DaemonSet 在 control-plane 节点也运行，采集系统组件日志
+- `imagePullPolicy: IfNotPresent` 配合预导入镜像
+
 ```bash
 kubectl apply -f deploy/promtail.yaml
 kubectl wait --for=condition=ready pod -l app=promtail -n monitoring --timeout=120s
 ```
 
-### Phase 4: 在 Grafana 中添加 Loki 数据源
+---
+
+## 第三部分：Loki（Helm 部署）
+
+### deploy/loki-values.yaml
+
+```yaml
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+    bucketNames:
+      chunks: chunks
+      ruler: ruler
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  # 日志保留：7 天后自动删除
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+  limits_config:
+    retention_period: 168h
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: local-path
+
+global:
+  image:
+    pullPolicy: IfNotPresent
+
+# 禁用不需要的组件
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+minio:
+  enabled: false
+lokiCanary:
+  enabled: false
+gateway:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+test:
+  enabled: false
+```
+
+关键点：
+- `deploymentMode: SingleBinary` 单节点模式，适合学习/小规模
+- `retention_period: 168h`（7 天），配合 `compactor.retention_enabled` 自动清理过期日志
+- `persistence.storageClass: local-path` 必须显式指定
+- 所有非必要组件 disabled，避免拉取额外镜像
+
+### 镜像准备
+
+节点 VM 不能直接访问 Docker Hub 时，从宿主机搬镜像：
 
 ```bash
-# 获取 Grafana admin 密码
-kubectl get secret -n monitoring kube-prometheus-stack-grafana \
-  -o jsonpath='{.data.admin-password}' | base64 -d
+# 在 Mac 宿主机上
+docker pull grafana/loki:3.6.7 --platform linux/arm64
+docker pull kiwigrid/k8s-sidecar:2.5.0 --platform linux/arm64
+docker pull grafana/promtail:3.5.1 --platform linux/arm64
 
-# 通过 Grafana API 添加 Loki 数据源（在 K8s 节点上执行）
+docker save grafana/loki:3.6.7 kiwigrid/k8s-sidecar:2.5.0 grafana/promtail:3.5.1 -o /tmp/log-images.tar
+
+scp /tmp/log-images.tar k8s-master-01:/tmp/
+scp /tmp/log-images.tar k8s-worker-01:/tmp/
+
+ssh k8s-master-01 "sudo ctr -n k8s.io image import /tmp/log-images.tar"
+ssh k8s-worker-01 "sudo ctr -n k8s.io image import /tmp/log-images.tar"
+```
+
+### 安装
+
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+helm upgrade --install loki grafana/loki \
+  --version 7.0.0 \
+  -n monitoring \
+  -f deploy/loki-values.yaml
+```
+
+### 验证
+
+```bash
+helm ls -n monitoring | grep loki
+kubectl get pods -n monitoring -l 'app.kubernetes.io/name=loki'
+```
+
+预期：`loki-0 2/2 Running`。
+
+---
+
+## 第四部分：Grafana 集成
+
+```bash
+# 通过 Grafana API 添加 Loki 数据源
 kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -- curl -s -X POST \
   -H 'Content-Type: application/json' \
   -d '{"name":"Loki","type":"loki","url":"http://loki.monitoring.svc.cluster.local:3100","access":"proxy"}' \
-  http://admin:<密码>@localhost:3000/api/datasources
+  http://admin:admin123@localhost:3000/api/datasources
 ```
 
-然后浏览器访问 Grafana → 左侧 **Explore** → 顶部数据源下拉选 **Loki** → 输入 LogQL 查询。
+浏览器访问 Grafana → **Explore** → 数据源下拉选 **Loki**。
 
-### Phase 5: LogQL 实战查询
+---
+
+## 第五部分：LogQL 实战
 
 ```logql
 # 查看 demo 命名空间所有日志
 {namespace="demo"}
 
-# 只看某个 Pod
+# 只看某个 Pod 的日志
 {namespace="demo", pod=~"demo-app-.*"}
 
 # 搜索包含 "error" 的日志（大小写不敏感）
@@ -310,149 +294,102 @@ kubectl exec -n monitoring deploy/kube-prometheus-stack-grafana -- curl -s -X PO
 # 统计 5 分钟内每个 Pod 的日志行数
 sum by (pod) (count_over_time({namespace="demo"}[5m]))
 
-# 查看过去 1 小时日志（Grafana Explore 右上角可调时间范围）
-# 或者通过 API 指定 start/end 参数
+# 查看过去 1 小时的日志（Grafana Explore 右上角调整时间范围）
 ```
 
-### 关键概念对比：Metrics vs Logs
+---
 
-| 维度         | Metrics（指标）               | Logs（日志）                          |
-| ---------- | ------------------------- | --------------------------------- |
-| 采集组件       | Prometheus（Pull 模式）       | Promtail → Loki（Push 模式）          |
-| 数据类型       | 数字（CPU %、请求数、延迟 ms）       | 文本（stdout/stderr 输出）              |
-| 查询语言       | PromQL                    | LogQL                             |
-| 典型用途       | "Pod CPU 超过 80% 持续 5 分钟了" | "搜索最近 100 条包含 timeout 的日志"        |
-| Grafana 位置 | Dashboard Panel           | Explore 页面 / Dashboard Logs Panel |
+## 第六部分：Metrics vs Logs
 
-> **告警可以在哪里配置？** 当前笔记通过 `PrometheusRule` CRD 在 Prometheus 侧配置（YAML 管理、GitOps 友好），也可以在 **Grafana UI → Alerting → Alert rules → New alert rule** 手动创建。两者底层查询的都是 Prometheus PromQL，生产环境推荐 PrometheusRule（可版本管理）。
+| 维度 | Metrics（指标） | Logs（日志） |
+|------|----------------|-------------|
+| 采集组件 | Prometheus（Pull） | Promtail → Loki（Push） |
+| 数据类型 | 数字（CPU %、请求数、延迟 ms） | 文本（stdout/stderr） |
+| 查询语言 | PromQL | LogQL |
+| Grafana 位置 | Dashboard Panel | Explore / Dashboard Logs Panel |
+| 典型用途 | "Pod CPU 超过 80% 持续 5 分钟了" | "搜索最近 100 条含 timeout 的日志" |
 
-***
+---
 
-## 第二部分：K8s 容器日志轮转配置
+## 第七部分：K8s 容器日志轮转
 
-### 日志轮转由谁负责？
+### 谁负责轮转？
 
 ```
 应用 stdout/stderr
       │
       ▼
-┌──────────────────────────────────────────────┐
-│ containerd (运行时)                            │
-│   max_container_log_line_size = 16384 (16KB)  │  ← 只限制单行长度
-│   ❌ 不负责日志轮转                            │
-└────────────────────┬─────────────────────────┘
-                     │ 写入文件
-                     ▼
-┌──────────────────────────────────────────────┐
-│ kubelet (容器日志管理器)                        │
-│   containerLogMaxSize  — 单文件最大多大后轮转    │
-│   containerLogMaxFiles — 每个容器保留几个历史文件 │
-│                                               │
-│   轮转规则: 到达上限 → 0.log → 1.log → ...       │
-│   日志路径: /var/log/pods/<ns>_<pod>_<uid>/    │
-│                       <container>/0.log       │
-└──────────────────────────────────────────────┘
+containerd（运行时）
+  max_container_log_line_size = 16384  ← 只限制单行长度
+  ❌ 不负责日志轮转
+      │
+      ▼
+kubelet（容器日志管理器）
+  containerLogMaxSize  — 单文件超过多大后轮转
+  containerLogMaxFiles — 每个容器保留几个历史文件
 ```
 
-### 默认值
+### 配置
 
-kubelet 不显式配置时，使用硬编码默认值：
+kubelet 默认值：`containerLogMaxSize: 10Mi`，`containerLogMaxFiles: 5`。
 
-| 参数                     | 默认值    | 含义                           |
-| ---------------------- | ------ | ---------------------------- |
-| `containerLogMaxSize`  | `10Mi` | 单个日志文件超过 10Mi 就轮转            |
-| `containerLogMaxFiles` | `5`    | 每个容器最多保留 5 个历史文件（当前 + 4 个轮转） |
-
-### 磁盘占用上限
-
-```
-max_per_container = containerLogMaxSize × containerLogMaxFiles
-                   = 50Mi × 10 = 500Mi
-
-worst_case = 总容器数 × max_per_container
-```
-
-### 配置方法
-
-编辑 kubelet 配置文件（两个节点都要做）：
-
-```bash
-# 备份
-sudo cp /var/lib/kubelet/config.yaml /var/lib/kubelet/config.yaml.bak
-
-# 编辑，在 cgroupDriver 下方添加
-sudo vi /var/lib/kubelet/config.yaml
-```
-
-在 `cgroupDriver: systemd` 之后添加：
+编辑 `/var/lib/kubelet/config.yaml`（两个节点都要做），在 `cgroupDriver` 后添加：
 
 ```yaml
 containerLogMaxSize: "50Mi"
 containerLogMaxFiles: 10
 ```
 
-然后重启 kubelet：
-
 ```bash
 sudo systemctl restart kubelet
-```
-
-验证配置已加载：
-
-```bash
+# 验证
 sudo journalctl -u kubelet --since '1 min ago' --no-pager | grep "container_log_manager"
-# 看到 "Initializing container log rotate workers" 说明生效
 ```
 
 ### 参数建议
 
-| 场景    | containerLogMaxSize | containerLogMaxFiles |
-| ----- | ------------------- | -------------------- |
-| 开发/学习 | 10Mi（默认）            | 5（默认）                |
-| 一般生产  | 50Mi                | 10                   |
-| 高流量应用 | 100Mi               | 20                   |
+| 场景 | containerLogMaxSize | containerLogMaxFiles |
+|------|--------------------|--------------------|
+| 开发/学习 | 10Mi（默认）| 5（默认）|
+| 一般生产 | 50Mi | 10 |
+| 高流量 | 100Mi | 20 |
 
-### 对 Promtail 的影响
-
-Promtail 通过 inode 跟踪文件，kubelet 轮转时旧文件被删除，Promtail 自动停止读取已删除的文件，对新文件继续跟踪。**不需要额外配置**。
+> Promtail 通过 inode 跟踪文件，kubelet 轮转时旧文件被删除后自动停止读取，无需额外配置。
 
 ### 当前集群配置
 
-| 节点            | 配置                                                        |
-| ------------- | --------------------------------------------------------- |
-| k8s-master-01 | `containerLogMaxSize: "50Mi"`, `containerLogMaxFiles: 10` |
-| k8s-worker-01 | `containerLogMaxSize: "50Mi"`, `containerLogMaxFiles: 10` |
+| 节点 | containerLogMaxSize | containerLogMaxFiles |
+|------|--------------------|--------------------|
+| k8s-master-01 | 50Mi | 10 |
+| k8s-worker-01 | 50Mi | 10 |
 
-***
+---
 
 ## 调试锦囊
 
-### 问题：Promtail 启动报 permission denied
+### Promtail 权限错误
 
 ```bash
-# Promtail 需要读取 /var/log/pods，确保 hostPath 有正确权限
 kubectl logs -n monitoring ds/promtail --tail=20
 ```
 
-### 问题：Loki 查询返回空结果
+### Loki 查询返回空
 
-1. 确认 Promtail 正在推送：检查 Promtail 日志中有 `"msg"="push success"`
-2. 确认时间范围：Loki 默认查询范围可能太窄，调大 Grafana Explore 右上角的时间范围
-3. 确认标签匹配：`{namespace="demo"}` 中的 namespace 必须是 K8s namespace 名称
+1. 确认 Promtail 日志中有 `push success`
+2. 调大 Grafana Explore 时间范围
+3. 确认标签匹配：`{namespace="demo"}` 中的 namespace 是 K8s namespace 名称
 
-### 问题：Loki 磁盘占用过高
+### Loki 磁盘占用过高
 
-Loki 使用 emptyDir 存储，重启 Pod 数据会丢失。生产环境应配置持久化存储：
-
-```yaml
-# 将 emptyDir 替换为 PVC
-persistentVolumeClaim:
-  claimName: loki-data
+```bash
+# 检查 PVC 使用量
+kubectl get pvc -n monitoring
 ```
 
-### 问题：如何查看 Promtail 采集了哪些文件？
+当前已配置 `retention_period: 168h`（7 天），compactor 自动清理过期数据。
+
+### 查看 Promtail 采集了哪些文件
 
 ```bash
 kubectl logs -n monitoring ds/promtail | grep "tail routine: started"
 ```
-

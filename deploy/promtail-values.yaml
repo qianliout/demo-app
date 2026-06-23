@@ -1,0 +1,23 @@
+image:
+  registry: docker.io
+  repository: grafana/promtail
+  tag: 3.5.1
+  pullPolicy: IfNotPresent
+
+config:
+  clients:
+    - url: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# tolerations for control-plane nodes
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule

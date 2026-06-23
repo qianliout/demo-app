@@ -21,18 +21,25 @@ loki:
         index:
           prefix: loki_index_
           period: 24h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+  limits_config:
+    retention_period: 168h
 
 singleBinary:
   replicas: 1
   persistence:
     enabled: true
     size: 5Gi
+    storageClass: local-path
 
 # 节点 VM 网络不通 Docker Hub，走本地镜像
 global:
   image:
     pullPolicy: IfNotPresent
 
+# 禁用不需要的组件（避免拉取额外镜像）
 backend:
   replicas: 0
 read:
@@ -40,4 +47,14 @@ read:
 write:
   replicas: 0
 minio:
+  enabled: false
+lokiCanary:
+  enabled: false
+gateway:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+test:
   enabled: false
