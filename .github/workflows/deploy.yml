@@ -3,6 +3,7 @@ name: Build and Deploy
 on:
   push:
     branches:
+      - master
       - main
 
 env:
@@ -11,7 +12,7 @@ env:
 
 jobs:
   build-and-deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: "1.25"
 
       # Step 1: 用 Makefile 编译 Go 二进制（amd64 + arm64 都需要）
       - name: Build binary (arm64)
