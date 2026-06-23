@@ -1,0 +1,5 @@
+.git
+go.sum
+bin/
+Dockerfile
+.dockerignore
