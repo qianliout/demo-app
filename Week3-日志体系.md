@@ -2,9 +2,9 @@
 
 > 适用集群：OrbStack K8s (1 master + 1 worker, ARM64, v1.33.13)
 > 前置条件：kube-prometheus-stack 已安装，Grafana 可访问
-可以使用 ssh ssh k8s-master-01 进入master节点
+> 可以使用 ssh  k8s-master-01 进入master节点
 
----
+***
 
 ## 第一部分：Grafana Loki + Promtail 日志收集
 
@@ -316,17 +316,17 @@ sum by (pod) (count_over_time({namespace="demo"}[5m]))
 
 ### 关键概念对比：Metrics vs Logs
 
-| 维度 | Metrics（指标） | Logs（日志） |
-|------|----------------|-------------|
-| 采集组件 | Prometheus（Pull 模式） | Promtail → Loki（Push 模式） |
-| 数据类型 | 数字（CPU %、请求数、延迟 ms） | 文本（stdout/stderr 输出） |
-| 查询语言 | PromQL | LogQL |
-| 典型用途 | "Pod CPU 超过 80% 持续 5 分钟了" | "搜索最近 100 条包含 timeout 的日志" |
-| Grafana 位置 | Dashboard Panel | Explore 页面 / Dashboard Logs Panel |
+| 维度         | Metrics（指标）               | Logs（日志）                          |
+| ---------- | ------------------------- | --------------------------------- |
+| 采集组件       | Prometheus（Pull 模式）       | Promtail → Loki（Push 模式）          |
+| 数据类型       | 数字（CPU %、请求数、延迟 ms）       | 文本（stdout/stderr 输出）              |
+| 查询语言       | PromQL                    | LogQL                             |
+| 典型用途       | "Pod CPU 超过 80% 持续 5 分钟了" | "搜索最近 100 条包含 timeout 的日志"        |
+| Grafana 位置 | Dashboard Panel           | Explore 页面 / Dashboard Logs Panel |
 
 > **告警可以在哪里配置？** 当前笔记通过 `PrometheusRule` CRD 在 Prometheus 侧配置（YAML 管理、GitOps 友好），也可以在 **Grafana UI → Alerting → Alert rules → New alert rule** 手动创建。两者底层查询的都是 Prometheus PromQL，生产环境推荐 PrometheusRule（可版本管理）。
 
----
+***
 
 ## 第二部分：K8s 容器日志轮转配置
 
@@ -358,10 +358,10 @@ sum by (pod) (count_over_time({namespace="demo"}[5m]))
 
 kubelet 不显式配置时，使用硬编码默认值：
 
-| 参数 | 默认值 | 含义 |
-|------|--------|------|
-| `containerLogMaxSize` | `10Mi` | 单个日志文件超过 10Mi 就轮转 |
-| `containerLogMaxFiles` | `5` | 每个容器最多保留 5 个历史文件（当前 + 4 个轮转） |
+| 参数                     | 默认值    | 含义                           |
+| ---------------------- | ------ | ---------------------------- |
+| `containerLogMaxSize`  | `10Mi` | 单个日志文件超过 10Mi 就轮转            |
+| `containerLogMaxFiles` | `5`    | 每个容器最多保留 5 个历史文件（当前 + 4 个轮转） |
 
 ### 磁盘占用上限
 
@@ -406,11 +406,11 @@ sudo journalctl -u kubelet --since '1 min ago' --no-pager | grep "container_log_
 
 ### 参数建议
 
-| 场景 | containerLogMaxSize | containerLogMaxFiles |
-|------|---------------------|----------------------|
-| 开发/学习 | 10Mi（默认） | 5（默认） |
-| 一般生产 | 50Mi | 10 |
-| 高流量应用 | 100Mi | 20 |
+| 场景    | containerLogMaxSize | containerLogMaxFiles |
+| ----- | ------------------- | -------------------- |
+| 开发/学习 | 10Mi（默认）            | 5（默认）                |
+| 一般生产  | 50Mi                | 10                   |
+| 高流量应用 | 100Mi               | 20                   |
 
 ### 对 Promtail 的影响
 
@@ -418,12 +418,12 @@ Promtail 通过 inode 跟踪文件，kubelet 轮转时旧文件被删除，Promt
 
 ### 当前集群配置
 
-| 节点 | 配置 |
-|------|------|
+| 节点            | 配置                                                        |
+| ------------- | --------------------------------------------------------- |
 | k8s-master-01 | `containerLogMaxSize: "50Mi"`, `containerLogMaxFiles: 10` |
 | k8s-worker-01 | `containerLogMaxSize: "50Mi"`, `containerLogMaxFiles: 10` |
 
----
+***
 
 ## 调试锦囊
 
@@ -455,3 +455,4 @@ persistentVolumeClaim:
 ```bash
 kubectl logs -n monitoring ds/promtail | grep "tail routine: started"
 ```
+
