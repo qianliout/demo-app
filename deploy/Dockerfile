@@ -1,19 +1,12 @@
-FROM ubuntu:24.04
-
-# 安装运行时依赖
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+FROM scratch
 
 WORKDIR /app
 
-# 复制 make build 产出的二进制
-COPY bin/demo-app .
+# 复制 make build 产出的静态二进制
+COPY bin/demo-app /app/demo-app
 
-# 非 root 运行
-RUN useradd -r -s /bin/false appuser && \
-    chown appuser:appuser /app/demo-app
-USER appuser
+# 使用固定非 root UID/GID 运行，避免依赖基础镜像创建用户。
+USER 65532:65532
 
 EXPOSE 8080
-CMD ["./demo-app"]
+CMD ["/app/demo-app"]
